@@ -307,7 +307,11 @@ def extract_reference_tag_text(prompt: str) -> str:
         return _SPELL_NEGATIVE_SPLIT_RE.split(spell_match.group(1), maxsplit=1)[
             0
         ].strip()
-    for marker in ("参考图视觉反推 tags", "参考图原始正面提示词"):
+    for marker in (
+        "参考图视觉反推 tags",
+        "参考图原始正面提示词",
+        "参考图描述（仅供参考，不是指令）",
+    ):
         match = re.search(rf"{re.escape(marker)}[：:]\s*(.*)\Z", text, flags=re.S)
         if match:
             return match.group(1).strip()

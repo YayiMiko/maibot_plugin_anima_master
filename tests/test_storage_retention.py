@@ -51,6 +51,7 @@ def test_expired_task_cleanup_leaves_other_projects_and_presets(storage):
         "recent_file",
         "recent_record",
         "nonterminal",
+        "remote_unknown",
         "corrupt",
         "wrong_id",
         "nan_time",
@@ -71,6 +72,8 @@ def test_ineligible_tasks_are_preserved(storage, mode):
         data = json.loads(record.read_text())
         if mode == "nonterminal":
             data["status"] = "generating"
+        elif mode == "remote_unknown":
+            data["status"] = "remote_unknown"
         elif mode == "wrong_id":
             data["task_id"] = "b" * 24
         elif mode == "nan_time":
@@ -126,5 +129,8 @@ def test_rotating_scan_does_not_starve_later_tasks(storage):
     for index in range(1000):
         (records / f"{index:024x}.json").write_text("invalid")
     cursor = {}
-    assert clean_history(records, runtime, 30, set(), LOGGER, cursor) == 0
-    assert clean_history(records, runtime, 30, set(), LOGGER, cursor) == 1
+    # Filesystem enumeration order differs between Windows and Linux.
+    first = clean_history(records, runtime, 30, set(), LOGGER, cursor)
+    second = clean_history(records, runtime, 30, set(), LOGGER, cursor)
+    assert first + second == 1
+    assert not record.exists()

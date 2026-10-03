@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -176,7 +177,7 @@ def test_restart_does_not_resubmit(plugin):
         path = plugin.ctx.paths.data_dir / "tasks/a.json"
         write_record(path, {"status": "generating", "prompt_id": "existing"})
         await plugin.on_load()
-        assert json.loads(path.read_text())["status"] == "interrupted"
+        assert json.loads(path.read_text())["status"] == "remote_unknown"
         assert not plugin.jobs
 
     asyncio.run(run())
@@ -635,5 +636,321 @@ def test_unload_cancels_storage_maintenance_without_network(plugin):
         assert maintenance.cancelled()
         plugin.ctx.send.text.assert_not_awaited()
         plugin.ctx.llm.generate.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("text", ["/anm 状态", "/anm 诊断"])
+def test_status_has_reserved_capacity_and_handles_custom_workflow(
+    plugin, command, monkeypatch, text
+):
+    async def spawn(*args, **kwargs):
+        job = json.loads(Path(args[-1]).read_text(encoding="utf-8"))
+        assert job["action"] in {"status", "diagnose"}
+        payload = {
+            "ok": True,
+            "comfyui_api_reachable": True,
+            "custom_workflow_validation_deferred": True,
+            "dns_checks": {"private-host": True},
+            "base_url": "http://private-address",
+        }
+        return SimpleNamespace(
+            returncode=0,
+            communicate=AsyncMock(return_value=(json.dumps(payload).encode(), b"")),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    async def run():
+        await plugin.on_load()
+        plugin.job_actions.update(
+            {str(i): "generate" for i in range(plugin.config.maibot.max_pending)}
+        )
+        command.update(text=text)
+        command["message"]["reply_to"] = "quoted-text-not-an-image"
+        await plugin.handle_anm(**command)
+        await asyncio.gather(*list(plugin.jobs.values()))
+        reply = plugin.ctx.send.text.call_args.args[0]
+        assert "自定义工作流（提交时校验）" in reply
+        assert "未就绪" not in reply and "private" not in reply
+        if text.endswith("诊断"):
+            assert "DNS：1/1" in reply and "生图队列：8" in reply
+        plugin.ctx.llm.generate.assert_not_awaited()
+        await plugin.on_unload()
+
+    asyncio.run(run())
+
+
+def test_failed_acceptance_notice_does_not_abort_generation(
+    plugin, command, monkeypatch
+):
+    fake_worker(monkeypatch)
+    plugin.ctx.send.text.side_effect = TimeoutError("notice-only")
+
+    async def run():
+        await plugin.on_load()
+        await plugin.handle_anm(**command)
+        await asyncio.gather(*list(plugin.jobs.values()))
+        plugin.ctx.send.image.assert_awaited_once()
+        record = json.loads(
+            next(plugin.records.glob("*.json")).read_text(encoding="utf-8")
+        )
+        assert record["status"] == "sent"
+        assert record["delivery_started"]
+        assert record["delivery"][0]["seconds"] >= 0
+        assert record["stage_seconds"]["total"] >= 0
+
+    asyncio.run(run())
+
+
+def test_generation_timeout_keeps_remote_unknown_and_prompt_id(
+    plugin, command, monkeypatch
+):
+    async def spawn(*args, **kwargs):
+        job = json.loads(Path(args[-1]).read_text(encoding="utf-8"))
+        path = Path(job["record"])
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record.update(status="generating", prompt_id="existing-job")
+        write_record(path, record)
+        return SimpleNamespace(
+            returncode=0,
+            communicate=AsyncMock(
+                return_value=(
+                    json.dumps({"ok": False, "error": "timeout_after_300s"}).encode(),
+                    b"",
+                )
+            ),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    async def run():
+        await plugin.on_load()
+        await plugin.handle_anm(**command)
+        await asyncio.gather(*list(plugin.jobs.values()))
+        record = json.loads(
+            next(plugin.records.glob("*.json")).read_text(encoding="utf-8")
+        )
+        assert (
+            record["status"] == "remote_unknown"
+            and record["prompt_id"] == "existing-job"
+        )
+        assert "核对任务" in plugin.ctx.send.text.call_args.args[0]
+        plugin.ctx.send.image.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "state,expected",
+    [
+        ("planning", "interrupted"),
+        ("submitting", "remote_unknown"),
+        ("sending", "delivery_unknown"),
+    ],
+)
+def test_reload_distinguishes_remote_and_delivery_uncertainty(plugin, state, expected):
+    async def run():
+        path = plugin.ctx.paths.data_dir / "tasks/test.json"
+        write_record(path, {"status": state})
+        await plugin.on_load()
+        assert json.loads(path.read_text())["status"] == expected
+        assert not plugin.jobs
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "recover",
+        "check",
+        "foreign",
+        "delivery_unknown",
+        "sent",
+        "simultaneous",
+        "send_timeout",
+    ],
+)
+def test_manual_recovery_is_scoped_and_never_resamples_or_resends(
+    plugin, command, monkeypatch, mode
+):
+    target = "a" * 24
+    scope = hashlib.sha256(
+        json.dumps(
+            [command["platform"], command["stream_id"], command["user_id"]]
+        ).encode()
+    ).hexdigest()
+    record_path = plugin.ctx.paths.data_dir / "tasks" / f"{target}.json"
+    original = {
+        "task_id": target,
+        "scope": scope,
+        "created_at": 1,
+        "action": "generate",
+        "prompt_id": "old-prompt",
+        "status": "remote_unknown",
+    }
+    if mode == "foreign":
+        original["scope"] = "another-user"
+    elif mode in {"delivery_unknown", "sent"}:
+        original.update(status=mode, delivery_started=True)
+    write_record(record_path, original)
+    write_record(
+        plugin.ctx.paths.runtime_dir / target / "job.json",
+        {"config": plugin.config.snapshot()},
+    )
+    spawned = []
+
+    async def spawn(*args, **kwargs):
+        job = json.loads(Path(args[-1]).read_text(encoding="utf-8"))
+        spawned.append(job["action"])
+        assert job["action"] in {"check_task", "recover_task"}
+        assert job["prompt_id"] == "old-prompt"
+        output = Path(job["outputs"]) / "recovered.png"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"image")
+        result = {"ok": True, "remote_state": "completed", "outputs": [str(output)]}
+        return SimpleNamespace(
+            returncode=0,
+            communicate=AsyncMock(return_value=(json.dumps(result).encode(), b"")),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    if mode == "send_timeout":
+        plugin.ctx.send.image.side_effect = TimeoutError()
+
+    async def run():
+        await plugin.on_load()
+        command["text"] = (
+            f"/anm {'核对任务' if mode == 'check' else '恢复任务'} {target}"
+        )
+        await plugin.handle_anm(**command)
+        if mode == "simultaneous":
+            command["message"]["message_id"] = "second-recovery"
+            await plugin.handle_anm(**command)
+        if mode not in {"foreign", "delivery_unknown", "sent"}:
+            assert target in plugin.history_targets.values()
+        if plugin.jobs:
+            await asyncio.gather(*list(plugin.jobs.values()))
+        if mode in {"foreign", "delivery_unknown", "sent"}:
+            assert not spawned
+            plugin.ctx.send.image.assert_not_awaited()
+        elif mode == "check":
+            assert spawned == ["check_task"]
+            plugin.ctx.send.image.assert_not_awaited()
+        else:
+            assert spawned == ["recover_task"]
+            plugin.ctx.send.image.assert_awaited_once()
+            saved = json.loads(record_path.read_text(encoding="utf-8"))
+            assert saved["status"] == (
+                "delivery_unknown" if mode == "send_timeout" else "sent"
+            )
+            command["message"]["message_id"] = "repeat-recovery"
+            await plugin.handle_anm(**command)
+            assert len(spawned) == 1
+        plugin.ctx.llm.generate.assert_not_awaited()
+        await plugin.on_unload()
+
+    asyncio.run(run())
+
+
+def test_scoped_latest_generation_index_survives_reload(plugin, command, monkeypatch):
+    fake_worker(monkeypatch)
+
+    async def run():
+        await plugin.on_load()
+        await plugin.handle_anm(**command)
+        await asyncio.gather(*list(plugin.jobs.values()))
+        generation_id = next(iter(plugin.latest_tasks.values()))
+        await plugin.on_unload()
+        await plugin.on_load()
+        command["text"] = "/anm 调试状态"
+        await plugin.handle_anm(**command)
+        assert generation_id in plugin.ctx.send.text.call_args.args[0]
+        assert "状态：sent" in plugin.ctx.send.text.call_args.args[0]
+        await plugin.on_unload()
+
+    asyncio.run(run())
+
+
+def test_check_task_does_not_release_another_recoverys_reservation(plugin, command):
+    target = "a" * 24
+    scope = hashlib.sha256(
+        json.dumps(
+            [command["platform"], command["stream_id"], command["user_id"]]
+        ).encode()
+    ).hexdigest()
+    write_record(
+        plugin.ctx.paths.data_dir / "tasks" / f"{target}.json",
+        {
+            "task_id": target,
+            "scope": scope,
+            "created_at": 1,
+            "action": "generate",
+            "prompt_id": "old-id",
+            "status": "remote_unknown",
+        },
+    )
+    write_record(
+        plugin.ctx.paths.runtime_dir / target / "job.json",
+        {"config": plugin.config.snapshot()},
+    )
+
+    async def run():
+        await plugin.on_load()
+        release = asyncio.Event()
+
+        async def execute(task_id, request):
+            if request["action"] == "recover_task":
+                await release.wait()
+
+        plugin._execute = AsyncMock(side_effect=execute)
+        command["text"] = f"/anm 恢复任务 {target}"
+        await plugin.handle_anm(**command)
+        command["text"] = f"/anm 核对任务 {target}"
+        command["message"]["message_id"] = "check-second"
+        await plugin.handle_anm(**command)
+        checks = [
+            task
+            for key, task in plugin.jobs.items()
+            if plugin.job_actions[key] == "check_task"
+        ]
+        await asyncio.gather(*checks)
+        await asyncio.sleep(0)
+        assert target in plugin.recovering
+        command["text"] = f"/anm 恢复任务 {target}"
+        command["message"]["message_id"] = "recover-third"
+        await plugin.handle_anm(**command)
+        assert plugin._execute.await_count == 2
+        release.set()
+        await asyncio.gather(*list(plugin.jobs.values()))
+        await plugin.on_unload()
+
+    asyncio.run(run())
+
+
+def test_unload_while_image_send_pending_never_makes_recoverable(
+    plugin, command, monkeypatch
+):
+    fake_worker(monkeypatch)
+
+    async def run():
+        await plugin.on_load()
+        sending = asyncio.Event()
+
+        async def delayed(*args, **kwargs):
+            sending.set()
+            await asyncio.Future()
+
+        plugin.ctx.send.image.side_effect = delayed
+        await plugin.handle_anm(**command)
+        await asyncio.wait_for(sending.wait(), timeout=3)
+        await plugin.on_unload()
+        record = json.loads(
+            next(plugin.records.glob("*.json")).read_text(encoding="utf-8")
+        )
+        assert record["status"] == "delivery_unknown"
+        assert record["delivery_started"]
+        plugin.ctx.send.image.assert_awaited_once()
 
     asyncio.run(run())

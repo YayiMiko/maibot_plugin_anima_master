@@ -49,6 +49,7 @@ class DanbooruResolver:
         get_int: Callable[[str, int], int],
         get_float: Callable[[str, float], float],
         get_str: Callable[[str, str], str],
+        lookup_slots: asyncio.Semaphore | None = None,
     ):
         """Store Danbooru lookup dependencies.
 
@@ -59,6 +60,7 @@ class DanbooruResolver:
             get_int: Config integer accessor.
             get_float: Config float accessor.
             get_str: Config string accessor.
+            lookup_slots: Plugin-wide limiter, including timed-out blocking work.
         """
         self.logger = logger
         self._cache = cache
@@ -66,7 +68,9 @@ class DanbooruResolver:
         self._int = get_int
         self._float = get_float
         self._str = get_str
-        self._lookup_slots = asyncio.Semaphore(2)
+        self._lookup_slots = (
+            lookup_slots if lookup_slots is not None else asyncio.Semaphore(2)
+        )
 
     def required_core_tags_for_prompt(self, user_prompt: str) -> tuple[str, ...]:
         """Return locally known character anchors explicitly requested by the user.

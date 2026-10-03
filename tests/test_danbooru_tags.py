@@ -463,3 +463,57 @@ def test_timed_out_lookups_do_not_start_unbounded_threads(monkeypatch) -> None:
     outcomes = asyncio.run(scenario())
     assert started == 2
     assert all(item.text == "candidate_character, 1girl" for item in outcomes)
+
+
+def test_distinct_request_resolvers_share_one_limiter(monkeypatch):
+    release = threading.Event()
+    started = 0
+    lock = threading.Lock()
+
+    def blocked(text, **kwargs):
+        nonlocal started
+        with lock:
+            started += 1
+        release.wait(3)
+        return tags_module.CoreTagResolution(text, (), ())
+
+    monkeypatch.setattr(resolver_module, "resolve_core_tags", blocked)
+
+    class Logger:
+        def warning(self, *args):
+            pass
+
+        def info(self, *args):
+            pass
+
+    async def run():
+        slots = asyncio.Semaphore(2)
+        resolvers = [
+            DanbooruResolver(
+                logger=Logger(),
+                cache={},
+                get_bool=lambda key, default: default,
+                get_int=lambda key, default: default,
+                get_float=lambda key, default: 1.0,
+                get_str=lambda key, default: default,
+                lookup_slots=slots,
+            )
+            for _ in range(4)
+        ]
+        try:
+            await asyncio.gather(
+                *(
+                    r.resolve_detailed(
+                        llm_content="candidate_character, 1girl",
+                        user_prompt="角色",
+                        fixed_character=False,
+                    )
+                    for r in resolvers
+                )
+            )
+            assert started == 2
+        finally:
+            release.set()
+            await asyncio.sleep(0.1)
+
+    asyncio.run(run())

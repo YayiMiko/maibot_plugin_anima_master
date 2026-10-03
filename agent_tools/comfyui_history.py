@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from comfyui_http import ComfyUIHttpClient
+
+from task_storage import write_record
 
 
 class ComfyUIHistoryRunner:
@@ -27,6 +28,14 @@ class ComfyUIHistoryRunner:
     def run_prompt(self, prompt_body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Submit a workflow and wait for its history result."""
         client_id = str(uuid.uuid4())
+        record_path = self.config.get("_task_record")
+        if record_path:
+            path = Path(record_path)
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record.update(
+                status="submitting", client_id=client_id, submitted_at=time.time()
+            )
+            write_record(path, record)
         submit = self.client.post_json(
             "/prompt",
             {"prompt": prompt_body, "client_id": client_id},
@@ -35,20 +44,14 @@ class ComfyUIHistoryRunner:
         prompt_id = str(submit.get("prompt_id") or "")
         if not prompt_id:
             raise RuntimeError(f"缺少 prompt_id：{submit}")
-        record_path = self.config.get("_task_record")
         if record_path:
-            path = Path(record_path)
             record = json.loads(path.read_text(encoding="utf-8"))
             record.update(prompt_id=prompt_id, status="generating")
-            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-            temporary.write_text(
-                json.dumps(record, ensure_ascii=False), encoding="utf-8"
-            )
-            os.replace(temporary, path)
+            write_record(path, record)
         timeout = max(1, int(self.config.get("timeout", 300)))
         poll_interval = max(1, int(self.config.get("poll_interval", 2)))
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             history = self.history(prompt_id)
             if history:
                 return prompt_id, history
@@ -58,10 +61,13 @@ class ComfyUIHistoryRunner:
     def save_history_images(self, history: dict[str, Any]) -> tuple[list[Path], int]:
         """Download all image outputs from a history payload."""
         images = output_images(history)
+        raw_count = len(images)
+        if "max_send_images" in self.config:
+            images = images[: int(self.config["max_send_images"])]
         outputs = [
             self.download_image(image, idx) for idx, image in enumerate(images, start=1)
         ]
-        return outputs, len(images)
+        return outputs, raw_count
 
     def download_image(self, image: dict[str, Any], index: int) -> Path:
         """Download a single ComfyUI output image."""
@@ -71,7 +77,7 @@ class ComfyUIHistoryRunner:
         output = self.image_outputs / f"{uuid.uuid4().hex}_{index}{ext}"
         temporary = output.with_suffix(".download")
         temporary.write_bytes(self.client.view_image_bytes(image, timeout=120))
-        os.replace(temporary, output)
+        temporary.replace(output)
         return output
 
 

@@ -63,6 +63,21 @@ Record the QQ receipt and image-send duration separately from generation time.
 Repeated images can reuse uploaded resources and are not a fresh-upload test.
 Do not automatically resend an uncertain delivery or regenerate its image.
 
+`/anm 核对任务 [TASK_ID]` reads the saved prompt history/queue using the original
+private connection snapshot. It does not submit or send an image.
+`/anm 恢复任务 [TASK_ID]` explicitly retrieves completed results only when no image
+delivery was previously attempted. Both commands are restricted to the caller's
+original conversation and user scope. Omit the ID to use the latest generation.
+Unknown deliveries are never resent; missing prompt IDs or snapshots require
+manual investigation. A cleared ComfyUI history is unknown, not proof of failure.
+
+Unsubmitted work interrupted by a reload is `interrupted`. Submitted work with an
+unconfirmed remote outcome is `remote_unknown`; cancellation during sending is
+`delivery_unknown`. Status checks do not overwrite the latest-generation index.
+Back up the private task/runtime directories if reproducibility or recovery is
+important. Generated workflow graphs, config snapshots and prompts are private
+runtime data, not release assets. Unknown remote jobs are not retention targets.
+
 On 2026-10-03 a fresh image was generated and sent once with a QQ message ID;
 image sending took approximately 12.7 seconds. Uploads exceeding one minute are
 still unverified. A longer timeout allows waiting; it does not accelerate QQ.

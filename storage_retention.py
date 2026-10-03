@@ -52,15 +52,24 @@ def clean_history(
         return 0
     cutoff = time.time() - days * 86400
     removed = 0
-    paths = list(records.glob("*.json"))
-    after = (cursor or {}).get("after", "")
-    paths.sort(key=lambda path: (path.name <= after, path.name))
-    for scanned, record_path in enumerate(paths):
-        if scanned >= 1000 or removed >= 64:
+    # Keep the directory iterator between batches instead of listing/sorting all records.
+    scan = cursor if cursor is not None else {}
+    iterator = scan.get("iterator")
+    if iterator is None:
+        iterator = os.scandir(records)
+        scan["iterator"] = iterator
+    for _ in range(1000):
+        if removed >= 64:
             break
+        entry = next(iterator, None)
+        if entry is None:
+            iterator.close()
+            scan.pop("iterator", None)
+            break
+        if not entry.name.endswith(".json"):
+            continue
+        record_path = Path(entry.path)
         task_id = record_path.stem
-        if cursor is not None:
-            cursor["after"] = record_path.name
         if task_id in active or not re.fullmatch(r"[a-f0-9]{24}", task_id):
             continue
         try:
@@ -136,6 +145,8 @@ def clean_history(
             removed += 1
         except (OSError, ValueError, TypeError):
             logger.warning("Retention skipped task %s", task_id, exc_info=True)
+    if cursor is None:
+        iterator.close()
     if removed:
         logger.info("Retention removed %s expired Anima tasks", removed)
     return removed

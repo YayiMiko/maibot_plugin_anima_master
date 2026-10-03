@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "id": "yayimiko.anima-master",
   "name": "Anima 绘图大师",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MaiBot Anima port: explicit text-to-image commands and upstream prompt planning.",
   "author": {"name": "YayiMiko", "url": "https://github.com/YayiMiko"},
   "urls": {"repository": "https://github.com/YayiMiko/maibot_plugin_anima_master"},
@@ -14,7 +14,8 @@
   "dependencies": [
     {"type": "python_package", "name": "requests", "version_spec": ">=2.32"},
     {"type": "python_package", "name": "pillow", "version_spec": ">=11"},
-    {"type": "python_package", "name": "httpx", "version_spec": ">=0.28"}
+    {"type": "python_package", "name": "httpx", "version_spec": ">=0.28,<1"},
+    {"type": "python_package", "name": "tomlkit", "version_spec": ">=0.13,<1"}
   ],
   "capabilities": ["send.text", "send.image", "llm.generate", "api.call"]
 }

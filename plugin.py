@@ -5,11 +5,9 @@ import base64
 import copy
 import hashlib
 import json
-import os
 import re
 import sys
 import time
-import uuid
 from pathlib import Path
 
 from maibot_sdk import Command, MaiBotPlugin
@@ -26,6 +24,7 @@ if __package__:
     from .model_client import ModelClient
     from .preset_actions import PRESET_ACTIONS, handle_preset
     from .storage_retention import clean_history
+    from .task_storage import write_record
 else:
     from anima.commands.command_router import parse_generation_size, parse_hard_route
     from anima.prompts.danbooru_resolver import DanbooruResolver
@@ -38,6 +37,7 @@ else:
     from model_client import ModelClient
     from preset_actions import PRESET_ACTIONS, handle_preset
     from storage_retention import clean_history
+    from task_storage import write_record
 
 COMMAND_PATTERN = r"(?i)^\s*(?:\[image\]\s*)*/(?:anm|anima|comfyui)(?:\s|$)"
 HELP = (
@@ -45,22 +45,6 @@ HELP = (
     "/anm 解析法术（附图或引用图）\n/anm 反推（附图或引用图）\n"
     "/anm 查看画师预设\n/anm 查看角色\n/anm 状态\n改图尚未开放。"
 )
-
-
-def write_record(path: Path, data: dict) -> None:
-    """Atomically persist one private request record or worker snapshot.
-
-    Args:
-        path: Plugin-owned destination.
-        data: JSON-serializable request-local values.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    temporary.chmod(0o600)
-    os.replace(temporary, path)
 
 
 class AnimaPlugin(MaiBotPlugin):
@@ -74,7 +58,12 @@ class AnimaPlugin(MaiBotPlugin):
             self.maintenance_task.cancel()
             await asyncio.gather(self.maintenance_task, return_exceptions=True)
         self.jobs = {}
+        self.job_actions = {}
+        self.history_targets = {}
+        self.recovering = set()
         self.worker_lock = asyncio.Lock()
+        self.storage_lock = asyncio.Lock()
+        self.lookup_slots = asyncio.Semaphore(2)
         self.cache = {}
         self.data = self.ctx.paths.data_dir
         self.runtime = self.ctx.paths.runtime_dir
@@ -117,44 +106,93 @@ class AnimaPlugin(MaiBotPlugin):
             ):
                 raise ValueError("Invalid chat preset storage; refusing to overwrite")
             self.chat_presets = stored
-        for path in self.records.glob("*.json"):
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-                if record.get("status") in {
-                    "accepted",
-                    "planning",
-                    "reading_image",
-                    "queued",
-                    "generating",
-                    "sending",
-                }:
-                    record["status"] = "interrupted"
-                    write_record(path, record)
-            except (OSError, ValueError):
-                self.ctx.logger.warning("Unreadable Anima task: %s", path.name)
+        self.latest_tasks = await asyncio.to_thread(self._restore_history)
         self.retention_cursor = {}
-        clean_history(
+        await asyncio.to_thread(
+            clean_history,
             self.records,
             self.runtime,
             int(self.config.snapshot()["storage_retention_days"]),
-            set(self.jobs),
+            set(self.jobs) | set(self.history_targets.values()),
             self.ctx.logger,
             self.retention_cursor,
         )
         self.maintenance_task = asyncio.create_task(self._maintain_storage())
 
+    def _restore_history(self) -> dict:
+        """Rebuild a scoped latest-generation index and classify interrupted work.
+
+        Returns:
+            Scope to latest generation task ID; no image or prompt content.
+        """
+        latest = {}
+        for path in self.records.glob("*.json"):
+            try:
+                if (
+                    path.is_symlink()
+                    or path.is_junction()
+                    or path.stat().st_size > 1024 * 1024
+                ):
+                    continue
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(record, dict):
+                    continue
+                state = record.get("status")
+                if state in {
+                    "accepted",
+                    "planning",
+                    "reading_image",
+                    "queued",
+                    "submitting",
+                    "generating",
+                    "sending",
+                    "generated",
+                }:
+                    record["status"] = (
+                        "delivery_unknown"
+                        if state == "sending" or record.get("delivery_started")
+                        else "remote_unknown"
+                        if record.get("prompt_id") or state == "submitting"
+                        else "interrupted"
+                    )
+                    write_record(path, record)
+                scope, task_id = record.get("scope", ""), record.get("task_id", "")
+                if (
+                    record.get("action") != "generate"
+                    or not re.fullmatch(r"[a-f0-9]{64}", scope)
+                    or not re.fullmatch(r"[a-f0-9]{24}", task_id)
+                    or path.stem != task_id
+                ):
+                    continue
+                created = float(record.get("created_at", 0))
+                if created > latest.get(scope, (0, ""))[0]:
+                    latest[scope] = (created, task_id)
+            except (OSError, ValueError, TypeError):
+                self.ctx.logger.warning("Unreadable Anima task: %s", path.name)
+        return {scope: item[1] for scope, item in latest.items()}
+
     async def _maintain_storage(self) -> None:
         """Check expired task storage hourly, without network access or retries."""
         while True:
             await asyncio.sleep(3600)
-            clean_history(
-                self.records,
-                self.runtime,
-                int(self.config.snapshot()["storage_retention_days"]),
-                set(self.jobs),
-                self.ctx.logger,
-                self.retention_cursor,
-            )
+            async with self.storage_lock:
+                maintenance = asyncio.create_task(
+                    asyncio.to_thread(
+                        clean_history,
+                        self.records,
+                        self.runtime,
+                        int(self.config.snapshot()["storage_retention_days"]),
+                        set(self.jobs) | set(self.history_targets.values()),
+                        self.ctx.logger,
+                        self.retention_cursor,
+                    )
+                )
+                try:
+                    await asyncio.shield(maintenance)
+                except asyncio.CancelledError:
+                    # Finish cleanup before releasing storage or closing the iterator.
+                    await maintenance
+                    raise
 
     async def on_unload(self) -> None:
         """Cancel local workers without globally interrupting ComfyUI."""
@@ -163,6 +201,9 @@ class AnimaPlugin(MaiBotPlugin):
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        iterator = self.retention_cursor.pop("iterator", None)
+        if iterator is not None:
+            iterator.close()
 
     async def on_config_update(
         self, scope: str, config_data: dict, version: str
@@ -185,6 +226,8 @@ class AnimaPlugin(MaiBotPlugin):
         snapshot = self.config.snapshot()
         snapshot.update(copy.deepcopy(self.chat_presets["overrides"]))
         config = apply_config_preset(snapshot)
+        # Host model routing controls reasoning, not legacy provider kwargs.
+        config["prompt_builder_deep_thinking_enabled"] = False
         stream, user = str(kwargs.get("stream_id", "")), str(kwargs.get("user_id", ""))
         if kwargs.get("platform") != "qq" or not stream or not user:
             return False, None, 2
@@ -213,21 +256,28 @@ class AnimaPlugin(MaiBotPlugin):
         if action == "help":
             await self.ctx.send.text(HELP, stream)
         elif action == "debug_status":
-            records = []
-            for path in self.records.glob("*.json"):
+            latest = None
+            task_id = self.latest_tasks.get(scope)
+            if task_id:
                 try:
-                    record = json.loads(path.read_text(encoding="utf-8"))
+                    record = json.loads(
+                        (self.records / f"{task_id}.json").read_text(encoding="utf-8")
+                    )
                     if record.get("scope") == scope:
-                        records.append(record)
+                        latest = record
                 except (OSError, ValueError):
-                    continue
-            latest = max(records, key=lambda r: r.get("created_at", 0), default=None)
+                    pass
             await self.ctx.send.text(
                 "暂无你的任务记录。"
                 if latest is None
-                else f"最近任务：{latest['task_id'][:8]}\n状态：{latest['status']}",
+                else f"最近任务：{latest['task_id']}\n状态：{latest['status']}\n远端：{latest.get('remote_state', '未核对')}\n可用 /anm 核对任务；未发送的旧结果可用 /anm 恢复任务。",
                 stream,
             )
+        elif action in {"check_task", "recover_task"}:
+            async with self.storage_lock:
+                await self._request_recovery(
+                    action, prompt, scope, stream, config, message
+                )
         elif action in PRESET_ACTIONS:
             message_id = str(message.get("message_id") or "")
             command_id = hashlib.sha256(f"{scope}:{message_id}".encode()).hexdigest()[
@@ -284,8 +334,6 @@ class AnimaPlugin(MaiBotPlugin):
                 "该功能尚未移植；当前支持普通文生图、多人、无优化和状态查询。", stream
             )
         else:
-            if action == "diagnose":
-                action = "status"
             multi_person = action == "multi_person"
             if multi_person:
                 action = "generate"
@@ -308,7 +356,12 @@ class AnimaPlugin(MaiBotPlugin):
             task_id = hashlib.sha256(f"{scope}:{message_id}".encode()).hexdigest()[:24]
             if (self.records / f"{task_id}.json").exists():
                 return True, None, 2
-            if len(self.jobs) >= config["max_pending"]:
+            is_status = action in {"status", "diagnose"}
+            count = sum(
+                (a in {"status", "diagnose"}) == is_status
+                for a in self.job_actions.values()
+            )
+            if count >= (2 if is_status else config["max_pending"]):
                 await self.ctx.send.text("Anima 队列已满，请稍后再试。", stream)
                 return True, None, 2
             write_record(
@@ -337,12 +390,139 @@ class AnimaPlugin(MaiBotPlugin):
                     "group_id": str(kwargs.get("group_id") or ""),
                     "user_id": user,
                 },
-                "has_reference": "[image]" in text or bool(message.get("reply_to")),
+                "has_reference": action == "generate"
+                and ("[image]" in text or bool(message.get("reply_to"))),
             }
+            if action == "generate":
+                self.latest_tasks[scope] = task_id
             task = asyncio.create_task(self._execute(task_id, request))
             self.jobs[task_id] = task
+            self.job_actions[task_id] = action
             task.add_done_callback(lambda _: self.jobs.pop(task_id, None))
+            task.add_done_callback(lambda _: self.job_actions.pop(task_id, None))
         return True, None, 2
+
+    async def _request_recovery(
+        self,
+        action: str,
+        prompt: str,
+        scope: str,
+        stream: str,
+        config: dict,
+        message: dict,
+    ) -> None:
+        """Authorize an explicit history check or retrieval of an unsent old result.
+
+        Args:
+            action: Read-only check or explicit recovery, never a new submission.
+            prompt: Optional complete task ID; defaults to the caller's latest generation.
+            scope: Current conversation and caller identity hash.
+            stream: Authorized destination.
+            config: Current permissions and sending limits.
+            message: Incoming deduplication identifier.
+        """
+        target = prompt.strip() or self.latest_tasks.get(scope, "")
+        if not re.fullmatch(r"[a-f0-9]{24}", target):
+            await self.ctx.send.text(
+                "没有可核对的任务，请用 /anm 调试状态 查看完整任务编号。", stream
+            )
+            return
+        try:
+            path = self.records / f"{target}.json"
+            if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+                raise ValueError("Invalid task storage")
+            original = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(original, dict)
+                or original.get("scope") != scope
+                or original.get("action") != "generate"
+                or original.get("task_id") != target
+            ):
+                raise ValueError("Task does not belong to the caller")
+            prompt_id = str(original.get("prompt_id", ""))
+            if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", prompt_id):
+                await self.ctx.send.text(
+                    "任务没有可查询的 ComfyUI 编号；不会自动重新提交。", stream
+                )
+                return
+            snapshot_path = self.runtime / target / "job.json"
+            if (
+                snapshot_path.is_symlink()
+                or not snapshot_path.resolve().is_relative_to(self.runtime.resolve())
+                or snapshot_path.stat().st_size > 8 * 1024 * 1024
+            ):
+                raise ValueError("Invalid task snapshot")
+            previous = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            recovery_config = previous["config"]
+            if not isinstance(recovery_config, dict):
+                raise ValueError("Invalid task configuration")
+        except (OSError, ValueError, KeyError, TypeError):
+            await self.ctx.send.text(
+                "该任务不可用、已过期或不属于当前会话与用户。", stream
+            )
+            return
+        if action == "recover_task" and (
+            target in self.jobs
+            or target in self.recovering
+            or original.get("recovered_by")
+            or original.get("delivery_started")
+            or original.get("delivery")
+            or original.get("status")
+            not in {"remote_unknown", "interrupted", "generated", "generation_failed"}
+        ):
+            await self.ctx.send.text(
+                "任务仍在处理，或图片曾尝试发送；为避免重复图片，本次不恢复发送。",
+                stream,
+            )
+            return
+        message_id = str(message.get("message_id") or "")
+        if not message_id:
+            await self.ctx.send.text("缺少消息编号，请重新发送指令。", stream)
+            return
+        task_id = hashlib.sha256(f"{scope}:{message_id}".encode()).hexdigest()[:24]
+        if (self.records / f"{task_id}.json").exists():
+            return
+        if (
+            sum(a not in {"status", "diagnose"} for a in self.job_actions.values())
+            >= config["max_pending"]
+        ):
+            await self.ctx.send.text("Anima 队列已满，请稍后再核对。", stream)
+            return
+        recovery_config["max_send_images"] = config["max_send_images"]
+        recovery_config["send_result_to_chat"] = config["send_result_to_chat"]
+        write_record(
+            self.records / f"{task_id}.json",
+            {
+                "task_id": task_id,
+                "scope": scope,
+                "created_at": time.time(),
+                "action": action,
+                "status": "accepted",
+                "recovery_of": target,
+                "source_message_id": message_id,
+            },
+        )
+        request = {
+            "config": recovery_config,
+            "stream": stream,
+            "prompt": "",
+            "action": action,
+            "width": None,
+            "height": None,
+            "prompt_id": prompt_id,
+            "recovery_of": target,
+        }
+        if action == "recover_task":
+            self.recovering.add(target)
+        task = asyncio.create_task(self._execute(task_id, request))
+        self.jobs[task_id] = task
+        self.job_actions[task_id] = action
+        self.history_targets[task_id] = target
+        task.add_done_callback(lambda _: self.jobs.pop(task_id, None))
+        task.add_done_callback(lambda _: self.job_actions.pop(task_id, None))
+        task.add_done_callback(lambda _: self.history_targets.pop(task_id, None))
+        if action == "recover_task":
+            task.add_done_callback(lambda _: self.recovering.discard(target))
 
     async def _execute(self, task_id: str, request: dict) -> None:
         """Plan one prompt, run one worker, and send outputs at most once.
@@ -356,14 +536,26 @@ class AnimaPlugin(MaiBotPlugin):
         config, stream = request["config"], request["stream"]
         directory = self.runtime / task_id
         directory.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        record["stage_seconds"] = {}
         try:
             prompt = request["prompt"]
             original_prompt = prompt
             action = request["action"]
             if action == "generate":
-                await self.ctx.send.text("Anima 任务已受理。", stream)
+                try:
+                    await self.ctx.send.text("Anima 任务已受理。", stream)
+                except Exception:
+                    self.ctx.logger.warning(
+                        "Anima acceptance notice failed: task=%s", task_id
+                    )
             elif action in {"spell", "reverse"}:
-                await self.ctx.send.text("正在读取本次图片。", stream)
+                try:
+                    await self.ctx.send.text("正在读取本次图片。", stream)
+                except Exception:
+                    self.ctx.logger.warning(
+                        "Anima image-reading notice failed: task=%s", task_id
+                    )
             if action in {"spell", "reverse"} or request.get("has_reference"):
                 record["status"] = "reading_image"
                 write_record(path, record)
@@ -413,6 +605,7 @@ class AnimaPlugin(MaiBotPlugin):
                     record["reference_context_method"] = method
                     record["status"] = "planning"
                     write_record(path, record)
+            record["stage_seconds"]["input"] = time.monotonic() - started
             if request["action"] == "generate":
                 record["status"] = "planning"
                 write_record(path, record)
@@ -426,6 +619,7 @@ class AnimaPlugin(MaiBotPlugin):
                 researcher = PromptResearcher(context=client, **dependencies)
                 resolver = DanbooruResolver(
                     cache=self.cache,
+                    lookup_slots=self.lookup_slots,
                     get_float=lambda key, default: float(config.get(key, default)),
                     **dependencies,
                 )
@@ -447,6 +641,9 @@ class AnimaPlugin(MaiBotPlugin):
                     ),
                     timeout=180,
                 )
+                record["stage_seconds"]["planning"] = (
+                    time.monotonic() - started - record["stage_seconds"]["input"]
+                )
                 record["prompt_summary"] = built.summary
                 if built.summary.get("multi_person_plan_failed"):
                     record["status"] = "planning_failed"
@@ -461,16 +658,26 @@ class AnimaPlugin(MaiBotPlugin):
                     raise ValueError("Prompt is empty")
                 record.update(prompt=prompt, prompt_summary=built.summary)
                 if built.summary.get("llm_failed"):
-                    await self.ctx.send.text(
-                        "提示词优化不可用，本次按原始描述继续生成。", stream
-                    )
+                    try:
+                        await self.ctx.send.text(
+                            "提示词优化不可用，本次按原始描述继续生成。", stream
+                        )
+                    except Exception:
+                        self.ctx.logger.warning(
+                            "Anima optimization notice failed: task=%s", task_id
+                        )
                 if built.summary.get("character_resolution_status") in {
                     "unresolved",
                     "failed",
                 } or built.summary.get("unresolved_character_count", 0):
-                    await self.ctx.send.text(
-                        "角色标签尚未可靠确认，外观可能偏离设定。", stream
-                    )
+                    try:
+                        await self.ctx.send.text(
+                            "角色标签尚未可靠确认，外观可能偏离设定。", stream
+                        )
+                    except Exception:
+                        self.ctx.logger.warning(
+                            "Anima identity notice failed: task=%s", task_id
+                        )
             record["status"] = "queued"
             write_record(path, record)
             job = {
@@ -481,13 +688,17 @@ class AnimaPlugin(MaiBotPlugin):
                 "height": request["height"],
                 "outputs": str(directory / "outputs"),
                 "record": str(path),
+                "prompt_id": request.get("prompt_id"),
             }
             snapshot = directory / "job.json"
             write_record(snapshot, job)
+            queued_at = time.monotonic()
             lock = (
                 self.worker_lock if request["action"] == "generate" else asyncio.Lock()
             )
             async with lock:
+                record["stage_seconds"]["queue"] = time.monotonic() - queued_at
+                write_record(path, record)
                 proc = await asyncio.create_subprocess_exec(
                     sys.executable,
                     str(Path(__file__).with_name("worker.py")),
@@ -497,7 +708,10 @@ class AnimaPlugin(MaiBotPlugin):
                 )
                 try:
                     stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=int(config["timeout"]) + 180
+                        proc.communicate(),
+                        timeout=int(config["timeout"])
+                        + int(config["max_send_images"]) * 120
+                        + 180,
                     )
                 finally:
                     if proc.returncode is None:
@@ -512,24 +726,86 @@ class AnimaPlugin(MaiBotPlugin):
                 )
                 raise RuntimeError("Worker failed")
             result = json.loads(stdout.decode("utf-8"))
-            if request["action"] == "status":
+            record["stage_seconds"]["worker_total"] = (
+                time.monotonic() - queued_at - record["stage_seconds"]["queue"]
+            )
+            if action in {"check_task", "recover_task"}:
+                state = result.get("remote_state", "unknown")
+                record["remote_state"] = state
+                original_path = self.records / f"{request['recovery_of']}.json"
+                if request["recovery_of"] not in self.jobs:
+                    original = json.loads(original_path.read_text(encoding="utf-8"))
+                    original["remote_state"] = state
+                    if state == "failed" and original.get("status") == "remote_unknown":
+                        original["status"] = "generation_failed"
+                    write_record(original_path, original)
+                if action == "check_task" or not result.get("outputs"):
+                    labels = {
+                        "completed": "已完成",
+                        "failed": "执行失败",
+                        "running": "仍在生成",
+                        "pending": "仍在排队",
+                        "unknown": "未知（可能历史已清除）",
+                    }
+                    await self.ctx.send.text(
+                        f"任务 {request['recovery_of']}\nComfyUI：{labels.get(state, '未知')}\n本次未采样、未发送图片。",
+                        stream,
+                    )
+                    record["status"] = "completed"
+                    write_record(path, record)
+                    return
+            if request["action"] in {"status", "diagnose"}:
                 online = result.get("comfyui_api_reachable", False)
                 ready = all(
                     result.get(k)
                     for k in ["unet_available", "clip_available", "vae_available"]
                 )
-                await self.ctx.send.text(
-                    f"ComfyUI：{'在线' if online else '离线'}\nAnima 模型：{'就绪' if ready else '未就绪'}",
-                    stream,
+                model = (
+                    "自定义工作流（提交时校验）"
+                    if result.get("custom_workflow_validation_deferred")
+                    else (
+                        "未检查"
+                        if not result.get("capabilities_checked")
+                        else "就绪"
+                        if ready
+                        else "未就绪"
+                    )
                 )
+                response = (
+                    f"ComfyUI：{'在线' if online else '离线'}\nAnima 模型：{model}"
+                )
+                if action == "diagnose":
+                    issue = result.get("connection_issue", "")
+                    issue_labels = {
+                        "remote_connect_timeout": "远程连接超时",
+                        "local_connect_timeout": "本机连接超时",
+                        "api_read_timeout": "API 响应超时",
+                        "connection_refused": "端口拒绝连接",
+                        "http_error": "HTTP 错误",
+                    }
+                    dns = result.get("dns_checks", {})
+                    response += f"\n连接检查：{issue_labels.get(issue, '正常' if result.get('ok') else '连接或能力检查失败')}\nDNS：{sum(bool(v) for v in dns.values())}/{len(dns)} 项正常\n生图队列：{sum(a == 'generate' for a in self.job_actions.values())} 个任务\n图片发送等待：180 秒\n提示词模型：{'指定模型' if config.get('prompt_model_name') else '宿主任务路由'}"
+                await self.ctx.send.text(response, stream)
                 record["status"] = "completed"
             elif not result.get("ok"):
+                uncertain = (
+                    record.get("status") in {"submitting", "generating", "generated"}
+                    and result.get("error") != "workflow_failed"
+                    and not (
+                        result.get("error") == "http_error"
+                        and 400 <= result.get("status_code", 0) < 500
+                    )
+                )
                 record.update(
-                    status="generation_failed", error=result.get("error", "unknown")
+                    status="remote_unknown" if uncertain else "generation_failed",
+                    error=result.get("error", "unknown"),
                 )
                 write_record(path, record)
                 await self.ctx.send.text(
-                    "Anima 生成未完成，请查看插件日志；没有自动重新提交。", stream
+                    "远端任务状态未确认，可用 /anm 核对任务；没有重新提交。"
+                    if uncertain
+                    else "Anima 生成未完成，请查看插件日志；没有自动重新提交。",
+                    stream,
                 )
             else:
                 outputs = result.get("outputs", [])[: int(config["max_send_images"])]
@@ -544,7 +820,19 @@ class AnimaPlugin(MaiBotPlugin):
                         image = Path(output).resolve(strict=True)
                         image.relative_to(directory.resolve())
                         record["status"] = "sending"
+                        record["delivery_started"] = True
+                        if action == "recover_task":
+                            original = json.loads(
+                                original_path.read_text(encoding="utf-8")
+                            )
+                            original.update(
+                                delivery_started=True,
+                                recovered_by=task_id,
+                                status="delivery_unknown",
+                            )
+                            write_record(original_path, original)
                         write_record(path, record)
+                        send_started = time.monotonic()
                         try:
                             encoded = base64.b64encode(
                                 await asyncio.to_thread(image.read_bytes)
@@ -563,6 +851,7 @@ class AnimaPlugin(MaiBotPlugin):
                                     "message_id": delivery.get("message_id")
                                     if isinstance(delivery, dict)
                                     else None,
+                                    "seconds": time.monotonic() - send_started,
                                 }
                             )
                             if not confirmed:
@@ -576,22 +865,47 @@ class AnimaPlugin(MaiBotPlugin):
                             )
                             return
                     record["status"] = "sent"
+                    if action == "recover_task":
+                        original = json.loads(original_path.read_text(encoding="utf-8"))
+                        original.update(
+                            status="sent", delivery=record["delivery"], outputs=outputs
+                        )
+                        write_record(original_path, original)
+            record["stage_seconds"]["total"] = time.monotonic() - started
             write_record(path, record)
         except asyncio.CancelledError:
             record = json.loads(path.read_text(encoding="utf-8"))
-            record["status"] = "interrupted"
+            record["status"] = (
+                "delivery_unknown"
+                if record.get("delivery_started")
+                else "remote_unknown"
+                if record.get("prompt_id") or record.get("status") == "submitting"
+                else "interrupted"
+            )
             write_record(path, record)
             raise
         except Exception as exc:
             record = json.loads(path.read_text(encoding="utf-8"))
-            if record.get("status") not in {"delivery_unknown", "generation_failed"}:
-                record["status"] = "failed"
-            record["error"] = type(exc).__name__
+            if record.get("status") not in {
+                "delivery_unknown",
+                "generation_failed",
+                "remote_unknown",
+            }:
+                record["status"] = (
+                    "remote_unknown"
+                    if record.get("prompt_id") or record.get("status") == "submitting"
+                    else "failed"
+                )
+            record.setdefault("error", type(exc).__name__)
+            record["exception_type"] = type(exc).__name__
             write_record(path, record)
             self.ctx.logger.exception("Anima task failed: task=%s", task_id)
             try:
                 await self.ctx.send.text(
-                    "Anima 任务未完成，请检查日志；没有自动重试。", stream
+                    "远端任务状态未确认，可用 /anm 核对任务；没有重新提交。"
+                    if record["status"] == "remote_unknown"
+                    else "Anima 任务未完成，请检查日志；没有自动重试。",
+                    stream,
                 )
             except Exception:
                 self.ctx.logger.exception(

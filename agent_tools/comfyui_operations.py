@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import random
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,8 @@ from comfyui_workflows import (
     workflow,
 )
 from PIL import Image, ImageOps
+
+from task_storage import write_record
 
 
 def generate_payload(
@@ -60,7 +64,50 @@ def generate_payload(
         seed,
         override_size=explicit_size,
     )
+    record_path = config.get("_task_record")
+    if record_path:
+        path = Path(record_path)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["generation_parameters"] = {
+            "seed": seed,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "cfg": cfg,
+            "sampler_name": config.get("sampler_name"),
+            "scheduler": config.get("scheduler"),
+        }
+        # Custom workflows may retain different sampling parameters; keep the actual graph.
+        write_record(Path(image_outputs).parent / "workflow.json", prompt_body)
+        for node in prompt_body.values():
+            if node.get("class_type") in {"KSampler", "KSamplerAdvanced"}:
+                record["generation_parameters"].update(
+                    {
+                        key: value
+                        for key, value in node.get("inputs", {}).items()
+                        if key
+                        in {
+                            "seed",
+                            "noise_seed",
+                            "steps",
+                            "cfg",
+                            "sampler_name",
+                            "scheduler",
+                        }
+                    }
+                )
+            if node.get("class_type") == "EmptyLatentImage":
+                record["generation_parameters"].update(
+                    {
+                        key: value
+                        for key, value in node.get("inputs", {}).items()
+                        if key in {"width", "height", "batch_size"}
+                    }
+                )
+        write_record(path, record)
+    started = time.monotonic()
     prompt_id, history = _run_prompt(config, image_outputs, prompt_body)
+    generation_seconds = time.monotonic() - started
     status_payload = history_failed(history)
     if status_payload:
         return {
@@ -70,6 +117,18 @@ def generate_payload(
             "status": status_payload,
         }
     outputs, raw_image_count = _save_history_images(config, image_outputs, history)
+    if record_path:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record.update(
+            remote_state="completed",
+            status="generated",
+            outputs=[str(p) for p in outputs],
+        )
+        record.setdefault("stage_seconds", {}).update(
+            generation=generation_seconds,
+            download=time.monotonic() - started - generation_seconds,
+        )
+        write_record(path, record)
     return {
         "ok": bool(outputs),
         "operation": "comfyui_generate",

@@ -151,6 +151,8 @@ def parse_hard_route(text: str) -> tuple[str, str] | None:
             return "help", ""
         rest_lower = rest.lower()
         action_map = [
+            ("核对任务", "check_task"),
+            ("恢复任务", "recover_task"),
             ("查看固定角色", "list_fixed_characters"),
             ("查看角色", "list_fixed_characters"),
             ("角色列表", "list_fixed_characters"),
