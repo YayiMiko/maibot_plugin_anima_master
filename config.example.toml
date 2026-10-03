@@ -1,0 +1,21 @@
+[plugin]
+config_version = "0.1.0"
+
+[maibot]
+vision_model_task = "vlm"
+vision_model_name = ""
+enabled = true
+prompt_model_task = "utils"
+prompt_model_name = ""
+
+[comfyui_connection]
+comfyui_base_url = "http://127.0.0.1:8188"
+auto_start = false
+
+[rendering]
+width = 1024
+height = 1536
+
+[style]
+fixed_characters = []
+artist_presets = []

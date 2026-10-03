@@ -1,0 +1,1 @@
+"""MaiBot Anima core package."""

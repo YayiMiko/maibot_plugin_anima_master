@@ -1,0 +1,853 @@
+{
+  "anima_master_basic": {
+    "description": "基础设置",
+    "type": "object",
+    "hint": "常用连接、模型和出图参数直接显示；打开「显示高级设置」可查看提示词、角色、多人生成与权限等配置。",
+    "items": {
+      "chiyo_preset": {
+        "description": "快捷预设",
+        "type": "string",
+        "default": "",
+        "options": [
+          "",
+          "base",
+          "aesthetic",
+          "turbo"
+        ],
+        "labels": [
+          "未启用",
+          "千代base",
+          "千代aesthetic",
+          "千代turbo"
+        ],
+        "hint": "一键套用一套画师、模型和参数。千代base 用 anima_baseV10、CFG 5；aesthetic 用 anima_aestheticV11、CFG 3，不注入默认正负面词；turbo 用 Turbo LoRA、10 步、CFG 1。会选择后把狐莉加入角色，但只有指令里提到狐莉才会用到。"
+      },
+      "show_advanced_settings": {
+        "description": "显示高级设置",
+        "type": "bool",
+        "default": false,
+        "hint": "展开默认提示词、角色、多人生成、发送权限等完整配置。只改变配置页显示，不影响生图。"
+      },
+      "reset_to_defaults": {
+        "description": "恢复默认配置",
+        "type": "bool",
+        "default": false,
+        "hint": "打开后保存并重载插件，配置就会重置为默认值，之后这个开关会自动关闭。"
+      }
+    }
+  },
+  "anima_master_comfyui_connection": {
+    "description": "ComfyUI 连接",
+    "type": "object",
+    "hint": "让插件连上你的 ComfyUI。",
+    "items": {
+      "comfyui_base_url": {
+        "description": "ComfyUI 地址",
+        "type": "string",
+        "default": "http://127.0.0.1:8188",
+        "hint": "ComfyUI 的 API 地址。和 ComfyUI 在同一台机器时用 http://127.0.0.1:8188；AstrBot 在服务器、ComfyUI 在本机时，填服务器能访问到的地址。"
+      },
+      "workflow": {
+        "description": "工作流",
+        "type": "string",
+        "default": "anima_t2i",
+        "hint": "插件内置的工作流类型，保持默认即可。",
+        "collapsed": true,
+        "condition": {
+          "custom_workflow_enabled": false
+        }
+      },
+      "custom_workflow_enabled": {
+        "description": "使用自定义工作流",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后使用你自己填的 ComfyUI 工作流 JSON；关闭则用插件内置工作流。"
+      },
+      "custom_workflow_path": {
+        "description": "自定义工作流文件",
+        "type": "string",
+        "default": "",
+        "hint": "ComfyUI API 工作流 JSON 的路径。服务器部署时填服务器上的路径。留空则不启用。",
+        "collapsed": false,
+        "condition": {
+          "custom_workflow_enabled": true
+        }
+      },
+      "custom_workflow_override_parameters": {
+        "description": "用插件参数覆盖自定义工作流参数",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，尺寸、步数、CFG、采样器等使用插件里的设置；关闭则沿用自定义工作流里的值。",
+        "condition": {
+          "custom_workflow_enabled": true
+        }
+      },
+      "timeout": {
+        "description": "单次生成超时（秒）",
+        "type": "int",
+        "default": 300,
+        "hint": "等待一张图生成的最长时间。",
+        "collapsed": true
+      },
+      "poll_interval": {
+        "description": "状态查询间隔（秒）",
+        "type": "int",
+        "default": 2,
+        "hint": "插件多久问一次 ComfyUI 生成进度。",
+        "collapsed": true
+      },
+      "storage_retention_days": {
+        "description": "文件保留天数",
+        "type": "int",
+        "default": 30,
+        "hint": "输入图片、输出图片和任务记录的保留天数；设为 0 不按时间清理。",
+        "collapsed": true
+      },
+      "manifest_max_records": {
+        "description": "图片清单数量上限",
+        "type": "int",
+        "default": 5000,
+        "hint": "清理时只保留仍然存在的最近记录。",
+        "collapsed": true
+      },
+      "auto_start": {
+        "description": "由 AstrBot 启动 ComfyUI",
+        "type": "bool",
+        "default": false,
+        "hint": "ComfyUI 离线且收到绘图请求时，用下面填写的命令启动 ComfyUI。仅当 AstrBot 和 ComfyUI 在同一台机器时可用。不是开机自启。",
+        "collapsed": true
+      },
+      "startup_command": {
+        "description": "启动命令",
+        "type": "string",
+        "default": "",
+        "hint": "开启「由 AstrBot 启动 ComfyUI」后必填，命令须能直接启动 ComfyUI 服务。",
+        "condition": {
+          "auto_start": true
+        }
+      },
+      "startup_workdir": {
+        "description": "启动工作目录",
+        "type": "string",
+        "default": "",
+        "hint": "执行启动命令时所在目录。",
+        "collapsed": true,
+        "condition": {
+          "auto_start": true
+        }
+      },
+      "startup_visible_window": {
+        "description": "启动时显示窗口",
+        "type": "bool",
+        "default": true,
+        "collapsed": true,
+        "condition": {
+          "auto_start": true
+        }
+      },
+      "auto_start_admin_only": {
+        "description": "仅管理员可启动",
+        "type": "bool",
+        "default": true,
+        "collapsed": true,
+        "condition": {
+          "auto_start": true
+        }
+      },
+      "auto_start_allowed_sender_ids": {
+        "description": "允许启动的用户",
+        "type": "list",
+        "default": [],
+        "collapsed": true,
+        "condition": {
+          "auto_start": true
+        },
+        "items": {
+          "type": "string"
+        },
+        "hint": "填 QQ 号或 AstrBot 识别到的用户 ID；留空表示不限制。"
+      },
+      "startup_wait_seconds": {
+        "description": "等待就绪时间（秒）",
+        "type": "int",
+        "default": 120,
+        "collapsed": true,
+        "condition": {
+          "auto_start": true
+        }
+      },
+      "startup_poll_interval": {
+        "description": "就绪检查间隔（秒）",
+        "type": "int",
+        "default": 3,
+        "collapsed": true,
+        "condition": {
+          "auto_start": true
+        }
+      }
+    }
+  },
+  "anima_master_models": {
+    "description": "模型文件",
+    "type": "object",
+    "hint": "填 ComfyUI 下拉框里显示的文件名，只填文件名，不填路径。",
+    "items": {
+      "unet_name": {
+        "description": "主模型文件名",
+        "type": "string",
+        "default": "anima_baseV10.safetensors",
+        "hint": "和 ComfyUI 下拉框中的文件名一致。示例：anima_baseV10.safetensors"
+      },
+      "clip_name": {
+        "description": "文本编码器文件名",
+        "type": "string",
+        "default": "qwen_3_06b_base.safetensors",
+        "hint": "和 ComfyUI 下拉框中的文件名一致。示例：qwen_3_06b_base.safetensors"
+      },
+      "vae_name": {
+        "description": "VAE 文件名",
+        "type": "string",
+        "default": "qwen_image_vae.safetensors",
+        "hint": "和 ComfyUI 下拉框中的文件名一致。示例：qwen_image_vae.safetensors"
+      }
+    },
+    "condition": {
+      "anima_master_comfyui_connection.custom_workflow_enabled": false
+    }
+  },
+  "anima_master_rendering": {
+    "description": "出图参数",
+    "type": "object",
+    "hint": "每次出图的默认尺寸和采样设置。",
+    "items": {
+      "width": {
+        "description": "默认宽度",
+        "type": "int",
+        "default": 1024,
+        "hint": "默认推荐 1024 x 1536；填了不在可用列表里的尺寸插件会自动贴近。示例：1024"
+      },
+      "height": {
+        "description": "默认高度",
+        "type": "int",
+        "default": 1536,
+        "hint": "默认推荐 1024 x 1536。示例：1536"
+      },
+      "allowed_sizes": {
+        "description": "可用尺寸列表",
+        "type": "list",
+        "default": [
+          "832x1216",
+          "896x1152",
+          "1024x1024",
+          "1152x896",
+          "1216x832",
+          "768x1344",
+          "1344x768",
+          "1024x1536"
+        ],
+        "hint": "格式为 宽x高，例如 1024x1536。",
+        "collapsed": true,
+        "items": {
+          "type": "string"
+        }
+      },
+      "steps": {
+        "description": "采样步数",
+        "type": "int",
+        "default": 30,
+        "hint": "示例：30",
+        "collapsed": true
+      },
+      "cfg": {
+        "description": "CFG 强度",
+        "type": "float",
+        "default": 5,
+        "hint": "示例：5.0",
+        "collapsed": true
+      },
+      "sampler_name": {
+        "description": "采样器",
+        "type": "string",
+        "default": "er_sde",
+        "hint": "示例：er_sde"
+      },
+      "scheduler": {
+        "description": "调度器",
+        "type": "string",
+        "default": "normal",
+        "hint": "示例：normal"
+      }
+    },
+    "condition": {
+      "anima_master_comfyui_connection.custom_workflow_enabled": false
+    }
+  },
+  "anima_master_default_prompt": {
+    "description": "默认提示词",
+    "type": "object",
+    "hint": "每次出图都会自动加到提示词里的正负面词。",
+    "condition": {
+      "anima_master_basic.show_advanced_settings": true
+    },
+    "items": {
+      "quality_prefix": {
+        "description": "质量词前缀",
+        "type": "string",
+        "default": "masterpiece, best quality, score_7, safe,",
+        "hint": "自动加在正面提示词前面。示例：masterpiece, best quality, score_7, safe,"
+      },
+      "negative_prompt": {
+        "description": "负面提示词",
+        "type": "string",
+        "default": "worst quality, low quality, score_1, score_2, score_3, artist name",
+        "hint": "每次出图作为反向提示词。示例：worst quality, low quality, score_1, score_2, score_3, artist name"
+      }
+    }
+  },
+  "anima_master_prompting": {
+    "description": "提示词生成",
+    "type": "object",
+    "hint": "把中文描述转成画图标签的相关设置。",
+    "condition": {
+      "anima_master_basic.show_advanced_settings": true
+    },
+    "items": {
+      "prompt_optimize_enabled": {
+        "description": "启用自然语言优化",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后把中文描述扩展成适合出图的标签；关闭后更接近原样提交。"
+      },
+      "prompt_builder_provider_id": {
+        "description": "优化模型",
+        "type": "string",
+        "default": "",
+        "hint": "留空使用当前会话主模型；需要单独指定模型时再填。",
+        "collapsed": true,
+        "condition": {
+          "prompt_optimize_enabled": true
+        }
+      },
+      "prompt_builder_max_tokens": {
+        "description": "优化模型输出上限",
+        "type": "int",
+        "default": 1000,
+        "hint": "示例：1000",
+        "collapsed": true,
+        "condition": {
+          "prompt_optimize_enabled": true
+        }
+      },
+      "prompt_builder_max_content_tags": {
+        "description": "标签数量上限",
+        "type": "int",
+        "default": 65,
+        "hint": "提示词内容段的标签数上限，不包含质量词、固定角色、画师预设和画风。",
+        "collapsed": true,
+        "condition": {
+          "prompt_optimize_enabled": true
+        }
+      },
+      "prompt_builder_web_search_enabled": {
+        "description": "联网搜索",
+        "type": "bool",
+        "default": true,
+        "hint": "指令里写「联网搜索」时尝试上网补充资料。需要在 AstrBot 里配置 Tavily Key，否则不会成功。",
+        "collapsed": true,
+        "condition": {
+          "prompt_optimize_enabled": true
+        }
+      },
+      "prompt_builder_search_max_results": {
+        "description": "搜索结果数量",
+        "type": "int",
+        "default": 5,
+        "hint": "示例：5",
+        "collapsed": true,
+        "condition": {
+          "prompt_optimize_enabled": true,
+          "prompt_builder_web_search_enabled": true
+        }
+      },
+      "prompt_builder_search_depth": {
+        "description": "搜索深度",
+        "type": "string",
+        "default": "advanced",
+        "hint": "可选：basic / advanced。示例：advanced",
+        "collapsed": true,
+        "condition": {
+          "prompt_optimize_enabled": true,
+          "prompt_builder_web_search_enabled": true
+        }
+      },
+      "prompt_builder_search_query_template": {
+        "description": "搜索词模板",
+        "type": "string",
+        "default": "{prompt} 角色 外观 立绘 服装 配色 武器 官方图 official art character design outfit appearance wiki fandom",
+        "hint": "联网搜索时使用的关键词模板，一般不用改。{prompt} 代表用户原始需求。",
+        "collapsed": true,
+        "condition": {
+          "prompt_optimize_enabled": true,
+          "prompt_builder_web_search_enabled": true
+        }
+      },
+      "prompt_builder_deep_thinking_enabled": {
+        "description": "深度思考",
+        "type": "bool",
+        "default": true,
+        "hint": "指令里写「深度思考」时尝试启用；不支持会自动降级。",
+        "collapsed": true,
+        "condition": {
+          "prompt_optimize_enabled": true
+        }
+      },
+      "prompt_builder_reasoning_effort": {
+        "description": "思考强度",
+        "type": "string",
+        "default": "high",
+        "hint": "常用：high / max。示例：high",
+        "collapsed": true,
+        "condition": {
+          "prompt_optimize_enabled": true,
+          "prompt_builder_deep_thinking_enabled": true
+        }
+      },
+      "low_cfg_harness_enabled": {
+        "description": "低 CFG 提示词约束",
+        "type": "bool",
+        "default": false,
+        "hint": "针对 CFG 1 等低 CFG 场景优化提示词组织。千代turbo 预设会自动开启。",
+        "collapsed": true
+      },
+      "prompt_builder_template": {
+        "description": "提示词模板",
+        "type": "string",
+        "default": "你是为 Anima 图像生成模型编写正面提示词的 AI 画师。\n\n请根据用户的原始要求设计一幅完整、协调、具有视觉吸引力的画面，并将结果输出为英文 Danbooru-style tags。\n\n输出要求：\n- 只输出一行英文 tags，使用英文逗号分隔。\n- 不要输出解释、分析、标题、编号、Markdown、代码块或中文。\n- 不要输出 masterpiece、best quality、score 等质量前缀。\n- 不要输出画师 tags；质量词和画师预设会由程序另行拼接。\n- 尽量使用模型容易理解的可见画面描述。\n- 保持用户明确指定的角色、主体、人数、关键服装、动作、表情和道具。\n- 除上述明确要求外，可以自由决定服装细节、姿态、构图、镜头、光影、色彩、氛围和特效。\n- 用户未明确要求地点、环境或背景时，按单张角色立绘设计，不要自行创造场景。\n- 以最终图像协调、精致、有表现力和好看为优先，不需要机械追求固定 Tag 数量。\n- 不要为了数量重复同义词；画面已经完整时即可停止。\n- 请自行解决明显冲突，直接输出你认为最适合生成最终画面的版本。\n\n角色和动态上下文：\n{character_rule}\n{search_block}\n{outfit_transfer_rule}\n{reference_rule}\n{img2img_rule}\n{sensual_rule}\n\n用户原始要求：\n{theme}",
+        "hint": "决定插件如何把中文需求改写成标签，一般不用改。详见 docs/prompting.md。",
+        "collapsed": true,
+        "condition": {
+          "prompt_optimize_enabled": true
+        }
+      }
+    }
+  },
+  "anima_master_style": {
+    "description": "角色与画风",
+    "type": "object",
+    "hint": "固定角色、画师预设和画风，以及涩气表现力相关设置。",
+    "condition": {
+      "anima_master_basic.show_advanced_settings": true
+    },
+    "items": {
+      "fixed_characters": {
+        "description": "角色",
+        "type": "list",
+        "default": [],
+        "hint": "每行一个角色，格式：角色名=tags。只有指令里提到角色名时才会使用。示例：狐莉=1girl, solo, fox girl",
+        "collapsed": true,
+        "items": {
+          "type": "string"
+        }
+      },
+      "artist_presets": {
+        "description": "画师预设",
+        "type": "list",
+        "default": [],
+        "hint": "每行一个画师预设，格式：名称=tags。也可以在聊天里用 /anm 创建画师预设 名称=tags 添加。示例：千代base=@artist_a, @artist_b,",
+        "collapsed": true,
+        "items": {
+          "type": "string"
+        }
+      },
+      "active_artist_preset": {
+        "description": "当前画师预设",
+        "type": "string",
+        "default": "",
+        "hint": "须和已保存的画师预设名称完全一致。也可以在聊天里用 /anm 切换画师预设 名称。优先级高于默认画师 tags。示例：千代base"
+      },
+      "default_artist_tags": {
+        "description": "备用画师标签",
+        "type": "string",
+        "default": "",
+        "hint": "只在没启用画师预设时使用。示例：@artist_a, @artist_b,",
+        "collapsed": true
+      },
+      "style_tags": {
+        "description": "画风",
+        "type": "string",
+        "default": "",
+        "hint": "填写媒介、上色和渲染标签，拼在当前画师预设之后。示例：anime coloring, cel shading, glossy highlights,",
+        "collapsed": true
+      },
+      "style_presets": {
+        "description": "已保存的画风",
+        "type": "list",
+        "default": [],
+        "hint": "每行一个画风，格式：名称=tags。示例：手游高精立绘=anime coloring, cel shading, glossy highlights,",
+        "items": {
+          "type": "string"
+        }
+      },
+      "active_style_preset": {
+        "description": "当前画风",
+        "type": "string",
+        "default": "",
+        "hint": "须和已保存的画风名称完全一致；留空则使用「画风」字段。示例：手游高精立绘"
+      },
+      "sensual_mode_enabled": {
+        "description": "涩气表现力优化",
+        "type": "bool",
+        "default": true,
+        "hint": "命中相关关键词时，让模型补充更有表现力的标签。"
+      },
+      "sensual_mode_markers": {
+        "description": "涩气触发词",
+        "type": "list",
+        "default": [
+          "色气",
+          "涩气",
+          "擦边",
+          "边界感",
+          "性感",
+          "诱惑",
+          "魅惑",
+          "妖艳",
+          "撩人",
+          "暧昧",
+          "挑逗",
+          "诱人",
+          "透明",
+          "透视",
+          "黑纱",
+          "薄纱",
+          "蕾丝",
+          "吊带",
+          "紧身",
+          "露肩",
+          "绝对领域",
+          "小恶魔",
+          "suggestive",
+          "seductive",
+          "sexy",
+          "sensual",
+          "alluring",
+          "see-through",
+          "sheer",
+          "transparent",
+          "lace",
+          "garter",
+          "teasing"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "hint": "示例：涩气, 透明, lace, teasing",
+        "collapsed": true,
+        "condition": {
+          "sensual_mode_enabled": true
+        }
+      }
+    }
+  },
+  "anima_master_tag_lookup": {
+    "description": "角色检索",
+    "type": "object",
+    "hint": "用于校正现有作品角色的标签。只在需要时访问 Donmai / Danbooru。",
+    "condition": {
+      "anima_master_basic.show_advanced_settings": true
+    },
+    "items": {
+      "danbooru_core_tag_lookup_enabled": {
+        "description": "联网校正角色标签",
+        "type": "bool",
+        "default": true,
+        "hint": "识别到疑似角色名时，上网查询其规范标签。Donmai 不可用时会回退到 Safebooru。"
+      },
+      "danbooru_tag_base_urls": {
+        "description": "查询地址",
+        "type": "string",
+        "default": "https://safebooru.donmai.us,https://danbooru.donmai.us",
+        "hint": "逗号分隔。示例：https://safebooru.donmai.us,https://danbooru.donmai.us",
+        "collapsed": true,
+        "condition": {
+          "danbooru_core_tag_lookup_enabled": true
+        }
+      },
+      "danbooru_tag_user_agent": {
+        "description": "访问标识",
+        "type": "string",
+        "default": "AstrBotAnimaMaster",
+        "hint": "访问 Donmai 只读 API 时使用的 User-Agent。示例：AstrBotAnimaMaster",
+        "collapsed": true,
+        "condition": {
+          "danbooru_core_tag_lookup_enabled": true
+        }
+      },
+      "danbooru_tag_lookup_timeout": {
+        "description": "查询超时（秒）",
+        "type": "float",
+        "default": 6,
+        "hint": "示例：6",
+        "collapsed": true,
+        "condition": {
+          "danbooru_core_tag_lookup_enabled": true
+        }
+      },
+      "danbooru_tag_max_candidates": {
+        "description": "候选标签上限",
+        "type": "int",
+        "default": 6,
+        "hint": "示例：6",
+        "collapsed": true,
+        "condition": {
+          "danbooru_core_tag_lookup_enabled": true
+        }
+      }
+    }
+  },
+  "anima_master_verify": {
+    "description": "生成校验",
+    "type": "object",
+    "hint": "生成后用视觉模型检查图片，不合格会重画。平时可以开着，只在需要时调。",
+    "condition": {
+      "anima_master_basic.show_advanced_settings": true
+    },
+    "items": {
+      "enable_verify": {
+        "description": "启用生成后自检",
+        "type": "bool",
+        "default": false,
+        "hint": "普通出图后自动检查图片，不合格会按次数重画。"
+      },
+      "verify_provider_id": {
+        "description": "自检模型",
+        "type": "string",
+        "default": "",
+        "hint": "留空时依次使用通用自检模型、会话看图模型或会话主模型。",
+        "collapsed": true,
+        "condition": {
+          "enable_verify": true
+        }
+      },
+      "verify_pass_score": {
+        "description": "合格分数",
+        "type": "int",
+        "default": 7,
+        "hint": "自检打分达到该值才算合格。示例：7",
+        "collapsed": true,
+        "condition": {
+          "enable_verify": true
+        }
+      },
+      "max_verify_retry": {
+        "description": "最多重画次数",
+        "type": "int",
+        "default": 1,
+        "hint": "未合格时最多重画几次。示例：1",
+        "collapsed": true,
+        "condition": {
+          "enable_verify": true
+        }
+      }
+    }
+  },
+  "anima_master_multi_person": {
+    "description": "多人生成",
+    "type": "object",
+    "hint": "只影响 /anm 多人：候选采样、视觉检查和并发。",
+    "condition": {
+      "anima_master_basic.show_advanced_settings": true
+    },
+    "items": {
+      "multi_candidate_count": {
+        "description": "候选数量",
+        "type": "int",
+        "default": 2,
+        "hint": "可选 1 到 3；首张通过检查时提前结束。"
+      },
+      "multi_verify_enabled": {
+        "description": "启用多人视觉检查",
+        "type": "bool",
+        "default": true,
+        "hint": "检查人数、单一场景、主要肢体问题、互动方向和角色区分。"
+      },
+      "multi_verify_provider_id": {
+        "description": "视觉检查模型",
+        "type": "string",
+        "default": "",
+        "hint": "留空时依次使用通用自检模型、会话看图模型或会话主模型。",
+        "collapsed": true,
+        "condition": {
+          "multi_verify_enabled": true
+        }
+      },
+      "multi_verify_pass_score": {
+        "description": "合格分数",
+        "type": "int",
+        "default": 6,
+        "hint": "示例：6",
+        "collapsed": true,
+        "condition": {
+          "multi_verify_enabled": true
+        }
+      },
+      "multi_send_degraded_candidate": {
+        "description": "发送最佳降级候选",
+        "type": "bool",
+        "default": true,
+        "hint": "全部候选都没通过时，仍发送结构最接近的一张。"
+      },
+      "multi_show_degraded_notice": {
+        "description": "提示候选降级",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后会在发送最佳降级候选前提示用户。",
+        "collapsed": true,
+        "condition": {
+          "multi_send_degraded_candidate": true
+        }
+      },
+      "multi_max_concurrent_generations": {
+        "description": "并发上限",
+        "type": "int",
+        "default": 1,
+        "hint": "只限制 /anm 多人，避免多个候选组同时争用 ComfyUI。",
+        "collapsed": true
+      }
+    }
+  },
+  "anima_master_delivery": {
+    "description": "发送与权限",
+    "type": "object",
+    "hint": "图片是否发回聊天，以及谁可以使用插件。",
+    "condition": {
+      "anima_master_basic.show_advanced_settings": true
+    },
+    "items": {
+      "send_result_to_chat": {
+        "description": "发送图片到聊天",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后只生成文件，不把图片发回聊天。"
+      },
+      "max_send_images": {
+        "description": "最多发送图片数",
+        "type": "int",
+        "default": 1,
+        "hint": "示例：1",
+        "collapsed": true,
+        "condition": {
+          "send_result_to_chat": true
+        }
+      },
+      "admin_only": {
+        "description": "仅管理员可用",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后只有 AstrBot 识别为管理员的用户可以使用。"
+      },
+      "allowed_sender_ids": {
+        "description": "用户白名单",
+        "type": "list",
+        "default": [],
+        "hint": "填 QQ 号或 AstrBot 识别到的用户 ID；留空表示不限制。示例：123456789",
+        "collapsed": true,
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "anima_master_experimental": {
+    "description": "可选功能",
+    "type": "object",
+    "hint": "图生图、放大、去背景等附加能力，不影响基础文生图。",
+    "condition": {
+      "anima_master_basic.show_advanced_settings": true
+    },
+    "items": {
+      "img2img_enabled": {
+        "description": "启用图生图",
+        "type": "bool",
+        "default": false,
+        "hint": "实验功能，默认关闭。关闭时相关指令会返回提示。",
+        "collapsed": true
+      },
+      "prompt_optimize_img2img_enabled": {
+        "description": "改图时优化提示词",
+        "type": "bool",
+        "default": false,
+        "hint": "适合整图改图；局部重绘请谨慎使用。",
+        "collapsed": true,
+        "condition": {
+          "img2img_enabled": true
+        }
+      },
+      "edit_denoise": {
+        "description": "改图重绘强度",
+        "type": "float",
+        "default": 0.55,
+        "hint": "示例：0.55",
+        "collapsed": true,
+        "condition": {
+          "img2img_enabled": true
+        }
+      },
+      "max_image_side": {
+        "description": "输入图最长边",
+        "type": "int",
+        "default": 1024,
+        "hint": "示例：1024",
+        "collapsed": true,
+        "condition": {
+          "img2img_enabled": true
+        }
+      },
+      "upscale_factor": {
+        "description": "默认放大倍率",
+        "type": "float",
+        "default": 2.0,
+        "hint": "示例：2.0",
+        "collapsed": true
+      },
+      "remove_bg_model": {
+        "description": "去背景模型",
+        "type": "string",
+        "default": "BiRefNet_lite",
+        "hint": "示例：BiRefNet_lite",
+        "collapsed": true
+      }
+    }
+  },
+  "anima_master_debug": {
+    "description": "调试",
+    "type": "object",
+    "hint": "只在排查问题时临时开启，平时保持关闭。",
+    "condition": {
+      "anima_master_basic.show_advanced_settings": true
+    },
+    "items": {
+      "debug_prompt_enabled": {
+        "description": "保存提示词日志",
+        "type": "bool",
+        "default": false,
+        "hint": "排查提示词问题时临时开启。",
+        "collapsed": true
+      },
+      "debug_image_reference_enabled": {
+        "description": "保存引用图解析日志",
+        "type": "bool",
+        "default": false,
+        "hint": "排查引用图问题时临时开启。",
+        "collapsed": true
+      },
+      "debug_send_payload_enabled": {
+        "description": "保存发送过程日志",
+        "type": "bool",
+        "default": false,
+        "hint": "排查未发图或发送失败时临时开启。",
+        "collapsed": true
+      }
+    }
+  }
+}
